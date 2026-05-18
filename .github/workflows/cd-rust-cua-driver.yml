@@ -70,6 +70,13 @@ jobs:
           mkdir -p "release/${STAGE}"
           cp "target/x86_64-unknown-linux-gnu/release/cua-driver" "release/${STAGE}/"
           cp ../../LICENSE.md "release/${STAGE}/LICENSE" 2>/dev/null || true
+          # Skill pack — agent-loaded SKILL.md bundle. install.sh detects it
+          # at $TMP_DIR/$STAGE/Skills/ after extraction and wires symlinks
+          # into each detected agent's skills dir.
+          if [ -d Skills/cua-driver-rs ]; then
+            mkdir -p "release/${STAGE}/Skills"
+            cp -R Skills/cua-driver-rs "release/${STAGE}/Skills/cua-driver-rs"
+          fi
           (cd release && tar -czf "${STAGE}.tar.gz" "${STAGE}")
           # Bare binary tarball — single file (cua-driver) at the archive root,
           # mirroring the Swift cua-driver `*-binary.tar.gz` convention.
@@ -135,6 +142,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path "release/$stage" | Out-Null
           Copy-Item "target/$target/release/cua-driver.exe" "release/$stage/"
           if (Test-Path "../../LICENSE.md") { Copy-Item "../../LICENSE.md" "release/$stage/LICENSE" }
+          # Skill pack — install.ps1 detects $stageDir\Skills\cua-driver-rs
+          # after extraction and wires junctions into each detected agent's
+          # skills dir.
+          if (Test-Path "Skills/cua-driver-rs") {
+              New-Item -ItemType Directory -Force -Path "release/$stage/Skills" | Out-Null
+              Copy-Item -Path "Skills/cua-driver-rs" -Destination "release/$stage/Skills/cua-driver-rs" -Recurse -Force
+          }
           # Zip the directory itself (no trailing /*) so the archive contains
           # the top-level "$stage" wrapper dir — install.ps1 walks into
           # extracted/cua-driver-rs-<v>-<arch>/cua-driver.exe to find the
@@ -268,6 +282,15 @@ jobs:
           cp release/universal/cua-driver \
              release/CuaDriverRs.app/Contents/MacOS/cua-driver
           chmod +x release/CuaDriverRs.app/Contents/MacOS/cua-driver
+          # Skill pack — agent-loaded SKILL.md bundle. Drop it INSIDE the
+          # bundle at the same path the Swift cua-driver uses so install.sh
+          # picks it up via ditto. Must happen BEFORE codesigning so the
+          # signature covers the skill files too.
+          if [ -d Skills/cua-driver-rs ]; then
+              mkdir -p release/CuaDriverRs.app/Contents/Resources/Skills
+              cp -R Skills/cua-driver-rs \
+                  release/CuaDriverRs.app/Contents/Resources/Skills/cua-driver-rs
+          fi
           # Stamp the release version into Info.plist so the bundle
           # version tracks the tag instead of whatever was last
           # checked in. Without this the in-tree Info.plist's

@@ -817,6 +817,17 @@ if (-not $skipDownload) {
         New-Item -ItemType Directory -Force -Path $versionedDir | Out-Null
         Copy-Item -LiteralPath (Join-Path $stageDir $BinaryName) -Destination (Join-Path $versionedDir $BinaryName) -Force
         Write-Step "installed $versionedDir\$BinaryName (version $version, target $target)"
+
+        # Skill pack — agent-loaded SKILL.md bundle for Claude Code / Codex /
+        # OpenClaw / OpenCode. Optional in the release artifact (older releases
+        # didn't ship one); when present, copy it alongside the binary so the
+        # `current` junction below transparently exposes it across upgrades.
+        $stagedSkills = Join-Path $stageDir "Skills"
+        if (Test-Path -LiteralPath $stagedSkills) {
+            $destSkillsRoot = Join-Path $versionedDir "Skills"
+            Copy-Item -Path $stagedSkills -Destination $destSkillsRoot -Recurse -Force
+            Write-Step "installed skill pack at $destSkillsRoot\cua-driver-rs"
+        }
     }
     finally {
         Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -828,6 +839,82 @@ if (-not $skipDownload) {
 # is what gives users a stable PATH entry.
 Ensure-Junction $CurrentDir    $versionedDir
 Ensure-Junction $VisibleBinDir $CurrentDir
+
+# ---------- Agent skill pack symlinks --------------------------------------
+#
+# Drop a directory junction for each detected agent that auto-loads
+# Anthropic-format SKILL.md skills from a folder. Auto-updates atomically
+# replace the per-version Skills/ dir; the junctions below all resolve
+# through `current`, so they stay valid across releases. We never
+# overwrite an existing link or directory — dev users with a junction
+# pointing at a working copy of the repo keep theirs.
+#
+# Supported (folder-of-skills, frontmatter compatible):
+#   - Claude Code: scans %USERPROFILE%\.claude\skills\ on startup
+#   - Codex      : scans %USERPROFILE%\.agents\skills\ on startup
+#   - OpenClaw   : scans %USERPROFILE%\.openclaw\skills\
+#   - OpenCode   : scans %APPDATA%\opencode\skills\ (also reads
+#                  %USERPROFILE%\.claude\skills\ natively, so the Claude
+#                  Code junction covers OpenCode for users who have both)
+#
+# Not auto-wired (different file format / would clobber user state):
+#   - Cursor: rules use a different frontmatter shape (description/globs/
+#             alwaysApply) — paste manually into ~/.cursor/rules/.
+#
+# Directory junctions (NTFS reparse points) work without admin/Developer
+# Mode, same as the binary's bin/current junctions above.
+
+$SkillTarget = Join-Path $CurrentDir "Skills\cua-driver-rs"
+
+function Link-AgentSkillPack {
+    param(
+        [Parameter(Mandatory=$true)][string]$ParentDir,
+        [Parameter(Mandatory=$true)][string]$Label
+    )
+    if (-not (Test-Path -LiteralPath $ParentDir)) { return }
+    $linkPath = Join-Path $ParentDir "cua-driver-rs"
+    if ((Test-Path -LiteralPath $linkPath) -or (Test-Path -LiteralPath "$linkPath" -PathType Container)) {
+        Write-Step "$Label skill link already exists at $linkPath (skipping)"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $SkillTarget)) {
+        Write-Step "skill pack missing at $SkillTarget (skipping; older release?)"
+        return
+    }
+    cmd /c mklink /J "$linkPath" "$SkillTarget" | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Step "linked $Label skill at $linkPath"
+    } else {
+        Write-WarningStep "failed to link $Label skill at $linkPath (exit $LASTEXITCODE)"
+    }
+}
+
+# Claude Code — only when %USERPROFILE%\.claude\skills already exists (Claude installed).
+Link-AgentSkillPack -ParentDir (Join-Path $env:USERPROFILE ".claude\skills") -Label "Claude Code"
+
+# Codex — create ~/.agents/skills if Codex is installed (~/.codex present)
+# but the agents skills dir hasn't been initialized yet, then link.
+if ((Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".codex")) -and `
+    (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".agents\skills")))) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".agents\skills") | Out-Null
+}
+Link-AgentSkillPack -ParentDir (Join-Path $env:USERPROFILE ".agents\skills") -Label "Codex"
+
+# OpenClaw — create ~/.openclaw/skills if OpenClaw is installed but the
+# skills dir hasn't been initialized yet, then link.
+if ((Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".openclaw")) -and `
+    (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".openclaw\skills")))) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".openclaw\skills") | Out-Null
+}
+Link-AgentSkillPack -ParentDir (Join-Path $env:USERPROFILE ".openclaw\skills") -Label "OpenClaw"
+
+# OpenCode (sst/opencode) — create %APPDATA%\opencode\skills if OpenCode is
+# installed but the skills dir hasn't been initialized yet, then link.
+if ((Test-Path -LiteralPath (Join-Path $env:APPDATA "opencode")) -and `
+    (-not (Test-Path -LiteralPath (Join-Path $env:APPDATA "opencode\skills")))) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:APPDATA "opencode\skills") | Out-Null
+}
+Link-AgentSkillPack -ParentDir (Join-Path $env:APPDATA "opencode\skills") -Label "OpenCode"
 
 # Post-install GC of old per-version release dirs. Runs AFTER the junction
 # retarget above so the about-to-be-active version is never a deletion

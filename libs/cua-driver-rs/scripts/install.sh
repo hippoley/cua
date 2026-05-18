@@ -411,19 +411,23 @@ VERSION="${TAG#${TAG_PREFIX}}"
 # Tarball selection:
 #
 # macOS — fetch the directory tarball (cua-driver-rs-vN-darwin-universal.tar.gz).
-#   The directory layout includes `CuaDriverRs.app/` alongside the bare
-#   binary, which we need to install into /Applications so the TCC
-#   auto-relaunch path in `cua-driver-rs mcp` can resolve
-#   `com.trycua.cuadriverrs` via `open -n -g -a CuaDriverRs`. The
-#   directory variant carries the same universal binary as the
-#   bare-binary tarball, so users on both Apple Silicon and Intel
-#   get a working install from one download.
+#   The directory layout includes `CuaDriverRs.app/` (with the skill pack
+#   at Contents/Resources/Skills/cua-driver-rs/ inside the bundle)
+#   alongside the bare binary. We need to install the .app into
+#   /Applications so the TCC auto-relaunch path in `cua-driver-rs mcp`
+#   can resolve `com.trycua.cuadriverrs` via `open -n -g -a CuaDriverRs`.
+#   The directory variant carries the same universal binary as the
+#   bare-binary tarball, so users on both Apple Silicon and Intel get a
+#   working install from one download.
 #
-# Linux / Windows-via-WSL — keep using the bare-binary tarball.
-#   No bundle on these platforms, no TCC, no need to unpack a directory.
+# Linux / Windows-via-WSL — fetch the directory tarball too (was
+#   bare-binary historically). The directory variant now ships the skill
+#   pack at `<stage>/Skills/cua-driver-rs/`; the bare-binary variant is
+#   still published for power users / CI but the installer prefers the
+#   richer tarball.
 case "$LABEL" in
     darwin-*) TARBALL="cua-driver-rs-${VERSION}-darwin-universal.tar.gz" ;;
-    *)        TARBALL="cua-driver-rs-${VERSION}-${LABEL}-binary.tar.gz" ;;
+    *)        TARBALL="cua-driver-rs-${VERSION}-${LABEL}.tar.gz" ;;
 esac
 URL="https://github.com/$REPO/releases/download/$TAG/$TARBALL"
 
@@ -441,10 +445,15 @@ tar -xzf "$TMP_DIR/$TARBALL" -C "$TMP_DIR"
 #     cua-driver-rs-${VERSION}-darwin-universal/
 #       ├── cua-driver           (bare universal binary)
 #       ├── CuaDriverRs.app/     (minimal bundle; copy of the same binary
-#       │                         lives at Contents/MacOS/cua-driver)
+#       │                         lives at Contents/MacOS/cua-driver; the
+#       │                         skill pack lives at
+#       │                         Contents/Resources/Skills/cua-driver-rs/)
 #       └── LICENSE
-#   Linux bare-binary tarball expands to:
-#     cua-driver               (single file at the archive root)
+#   Linux dir tarball expands to:
+#     cua-driver-rs-${VERSION}-${LABEL}/
+#       ├── cua-driver           (bare binary)
+#       ├── Skills/cua-driver-rs/   (optional; agent skill pack)
+#       └── LICENSE
 case "$LABEL" in
     darwin-*)
         STAGE="cua-driver-rs-${VERSION}-darwin-universal"
@@ -452,7 +461,14 @@ case "$LABEL" in
         SRC_APP="$TMP_DIR/$STAGE/$APP_NAME"
         ;;
     *)
-        SRC="$TMP_DIR/$BINARY_NAME"
+        STAGE="cua-driver-rs-${VERSION}-${LABEL}"
+        SRC="$TMP_DIR/$STAGE/$BINARY_NAME"
+        # Backward compatibility: if the bare-binary tarball was downloaded
+        # (older releases, or a manual binary-only install), $TMP_DIR will
+        # have the binary at the root instead of inside the $STAGE dir.
+        if [[ ! -f "$SRC" ]] && [[ -f "$TMP_DIR/$BINARY_NAME" ]]; then
+            SRC="$TMP_DIR/$BINARY_NAME"
+        fi
         SRC_APP=""
         ;;
 esac
@@ -522,6 +538,16 @@ if [[ "$OS" == "Darwin" && -n "$SRC_APP" && -d "$SRC_APP" ]]; then
     fi
     ln -sf "$APP_BINARY" "$BIN_LINK"
     log "symlinked $BIN_LINK -> $APP_BINARY"
+
+    # Skill pack — shipped inside the bundle at
+    # Contents/Resources/Skills/cua-driver-rs (same path the Swift
+    # cua-driver uses). The ditto above already copied it; we just
+    # remember where it lives for the agent-symlink step below. Older
+    # release artifacts didn't ship one — the check protects against that.
+    SKILL_TARGET="$APP_DEST/Contents/Resources/Skills/cua-driver-rs"
+    if [[ -d "$SKILL_TARGET" ]]; then
+        log "skill pack available at $SKILL_TARGET"
+    fi
 else
     # Linux: versioned-dirs + atomic `current` symlink swap.
     #
@@ -543,6 +569,15 @@ else
     mkdir -p "$VERSIONED_DIR"
     install -m 0755 "$SRC" "$VERSIONED_DIR/$BINARY_NAME"
     log "installed $VERSIONED_DIR/$BINARY_NAME (version $VERSION, target $TARGET)"
+
+    # Skill pack — optional in older releases. The directory tarball
+    # ships it at $TMP_DIR/$STAGE/Skills/cua-driver-rs/; the bare-binary
+    # tarball doesn't include it (older install path).
+    if [[ -d "$TMP_DIR/$STAGE/Skills/cua-driver-rs" ]]; then
+        mkdir -p "$VERSIONED_DIR/Skills"
+        cp -R "$TMP_DIR/$STAGE/Skills/cua-driver-rs" "$VERSIONED_DIR/Skills/cua-driver-rs"
+        log "installed skill pack at $VERSIONED_DIR/Skills/cua-driver-rs"
+    fi
 
     # `ln -sfn` would replace an existing dir-symlink in place but is
     # not atomic on Linux (it unlinks then symlinks). Use a tmp symlink
@@ -569,12 +604,84 @@ else
     ln -s "$CURRENT_LINK/$BINARY_NAME" "$BIN_LINK"
     log "symlinked $BIN_LINK -> $CURRENT_LINK/$BINARY_NAME"
 
+    # Skill-pack target path for agent symlinks below. Resolves through
+    # the `current` symlink so it stays valid across upgrades.
+    SKILL_TARGET="$CURRENT_LINK/Skills/cua-driver-rs"
+
     # Post-install GC of old per-version release dirs. Runs AFTER the
     # atomic `current` swap above so the about-to-be-active version is
     # never a deletion candidate (it's both the newest by mtime and
     # exempted via the current-symlink check inside prune_old_releases).
     prune_old_releases "$RELEASES_DIR" "$CURRENT_LINK" "$TARGET" "$KEEP_VERSIONS"
 fi
+
+# --- Install agent skill pack ------------------------------------------
+#
+# Drop a symlink for each detected agent that auto-loads Anthropic-format
+# SKILL.md skills from a folder. The link points at SKILL_TARGET, which on
+# macOS is fixed inside CuaDriverRs.app and on Linux resolves through the
+# `current` symlink — so upgrades stay transparent. We never overwrite an
+# existing link or directory — dev users with a symlink pointing at a
+# working copy of the repo keep theirs.
+#
+# Supported (folder-of-skills, frontmatter compatible):
+#   - Claude Code: scans ~/.claude/skills/ on startup
+#   - Codex      : scans ~/.agents/skills/ on startup
+#   - OpenClaw   : scans ~/.openclaw/skills/
+#   - OpenCode   : scans ~/.config/opencode/skills/ (also reads ~/.claude/
+#                  skills/ natively, so the Claude Code symlink covers
+#                  OpenCode for users who have both)
+#
+# Not auto-wired (different file format / would clobber user state):
+#   - Cursor: rules use a different frontmatter shape (description/globs/
+#             alwaysApply) — paste manually into ~/.cursor/rules/.
+#   - Hermes: SOUL.md replaces the system prompt — overwriting would destroy
+#             user customisations.
+#   - Pi    : SYSTEM.md / AGENTS.md are single-file replacements; same risk.
+
+link_skill_into() {
+    local parent_dir="$1"        # e.g. $HOME/.claude/skills
+    local label="$2"             # e.g. "Claude Code"
+    local link_path="$parent_dir/cua-driver-rs"
+
+    if [[ ! -d "$parent_dir" ]]; then
+        return 0
+    fi
+    if [[ -e "$link_path" ]] || [[ -L "$link_path" ]]; then
+        log "$label skill link already exists at $link_path (skipping)"
+        return 0
+    fi
+    if [[ ! -d "$SKILL_TARGET" ]]; then
+        log "skill pack missing at $SKILL_TARGET (skipping; older release?)"
+        return 0
+    fi
+    ln -s "$SKILL_TARGET" "$link_path"
+    log "symlinked $label skill at $link_path"
+}
+
+# Claude Code — only when ~/.claude/skills already exists (Claude installed).
+link_skill_into "$HOME/.claude/skills" "Claude Code"
+
+# Codex — create ~/.agents/skills if Codex is installed (~/.codex present)
+# but the agents skills dir hasn't been initialized yet, then link.
+if [[ -d "$HOME/.codex" ]] && [[ ! -d "$HOME/.agents/skills" ]]; then
+    mkdir -p "$HOME/.agents/skills"
+fi
+link_skill_into "$HOME/.agents/skills" "Codex"
+
+# OpenClaw — create ~/.openclaw/skills if OpenClaw is installed but the
+# skills dir hasn't been initialized yet, then link.
+if [[ -d "$HOME/.openclaw" ]] && [[ ! -d "$HOME/.openclaw/skills" ]]; then
+    mkdir -p "$HOME/.openclaw/skills"
+fi
+link_skill_into "$HOME/.openclaw/skills" "OpenClaw"
+
+# OpenCode (sst/opencode) — create ~/.config/opencode/skills if OpenCode is
+# installed but the skills dir hasn't been initialized yet, then link.
+if [[ -d "$HOME/.config/opencode" ]] && [[ ! -d "$HOME/.config/opencode/skills" ]]; then
+    mkdir -p "$HOME/.config/opencode/skills"
+fi
+link_skill_into "$HOME/.config/opencode/skills" "OpenCode"
 
 # --- Fire the one-shot install telemetry ping ---------------------------
 #

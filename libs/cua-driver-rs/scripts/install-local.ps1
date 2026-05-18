@@ -154,6 +154,21 @@ New-Item -ItemType Directory -Path $VersionedDir -Force | Out-Null
 Copy-Item -LiteralPath $BuiltBinary -Destination (Join-Path $VersionedDir $BinaryName) -Force
 $installedBinary = Join-Path $VersionedDir $BinaryName
 
+# Stage the skill pack alongside the binary. install-local mirrors what
+# install.ps1 does from a release zip — copies Skills/cua-driver-rs/ from
+# the repo into the versioned dir so the `current` junction below
+# transparently exposes it to agents.
+$SourceSkills = Join-Path $RepoRoot "Skills\cua-driver-rs"
+if (Test-Path -LiteralPath $SourceSkills) {
+    $StagedSkills = Join-Path $VersionedDir "Skills\cua-driver-rs"
+    if (Test-Path -LiteralPath $StagedSkills) {
+        Remove-Item -LiteralPath $StagedSkills -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $StagedSkills) -Force | Out-Null
+    Copy-Item -Path $SourceSkills -Destination $StagedSkills -Recurse -Force
+    Write-Step "staged skill pack at $StagedSkills"
+}
+
 # ---------- Repoint junctions ---------------------------------------------
 
 Write-Step "retargeting $CurrentDir -> $VersionedDir"
@@ -168,6 +183,48 @@ if (Test-Path -LiteralPath $VisibleBinDir) {
     }
 }
 Ensure-Junction -linkPath $VisibleBinDir -targetPath $CurrentDir
+
+# ---------- Agent skill pack symlinks --------------------------------------
+# Same logic as install.ps1 — junction into ~/.claude/skills, etc.,
+# pointing at <current>/Skills/cua-driver-rs (so upgrades stay
+# transparent). Never overwrites existing user links.
+
+$SkillTarget = Join-Path $CurrentDir "Skills\cua-driver-rs"
+
+function Link-AgentSkillPack {
+    param(
+        [Parameter(Mandatory=$true)][string]$ParentDir,
+        [Parameter(Mandatory=$true)][string]$Label
+    )
+    if (-not (Test-Path -LiteralPath $ParentDir)) { return }
+    $linkPath = Join-Path $ParentDir "cua-driver-rs"
+    if (Test-Path -LiteralPath $linkPath) {
+        Write-Step "$Label skill link already exists at $linkPath (skipping)"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $SkillTarget)) { return }
+    cmd /c mklink /J "$linkPath" "$SkillTarget" | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Step "linked $Label skill at $linkPath"
+    }
+}
+
+Link-AgentSkillPack -ParentDir (Join-Path $env:USERPROFILE ".claude\skills")  -Label "Claude Code"
+if ((Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".codex")) -and `
+    (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".agents\skills")))) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".agents\skills") | Out-Null
+}
+Link-AgentSkillPack -ParentDir (Join-Path $env:USERPROFILE ".agents\skills")  -Label "Codex"
+if ((Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".openclaw")) -and `
+    (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".openclaw\skills")))) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".openclaw\skills") | Out-Null
+}
+Link-AgentSkillPack -ParentDir (Join-Path $env:USERPROFILE ".openclaw\skills") -Label "OpenClaw"
+if ((Test-Path -LiteralPath (Join-Path $env:APPDATA "opencode")) -and `
+    (-not (Test-Path -LiteralPath (Join-Path $env:APPDATA "opencode\skills")))) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:APPDATA "opencode\skills") | Out-Null
+}
+Link-AgentSkillPack -ParentDir (Join-Path $env:APPDATA "opencode\skills")     -Label "OpenCode"
 
 # ---------- Done -----------------------------------------------------------
 

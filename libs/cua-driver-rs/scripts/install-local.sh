@@ -142,6 +142,18 @@ mkdir -p "$VERSIONED_DIR"
 cp "$BUILT_BINARY" "$VERSIONED_DIR/cua-driver"
 chmod +x "$VERSIONED_DIR/cua-driver"
 
+# Skill pack — stage from the repo so the `current` symlink below
+# transparently exposes it to agents. Mirrors what install.sh does
+# from a release tarball.
+SOURCE_SKILLS="$SCRIPT_DIR/../Skills/cua-driver-rs"
+if [ -d "$SOURCE_SKILLS" ]; then
+    STAGED_SKILLS="$VERSIONED_DIR/Skills/cua-driver-rs"
+    rm -rf "$STAGED_SKILLS"
+    mkdir -p "$(dirname "$STAGED_SKILLS")"
+    cp -R "$SOURCE_SKILLS" "$STAGED_SKILLS"
+    echo "${GREEN}staged skill pack at $STAGED_SKILLS${NORMAL}"
+fi
+
 # Atomic-ish swap of the `current` symlink.
 mkdir -p "$HOME_DIR/packages"
 TMP_LINK="$CURRENT_LINK.new"
@@ -159,6 +171,41 @@ echo "${GREEN}$BIN_DIR/cua-driver -> $CURRENT_LINK/cua-driver${NORMAL}"
 echo ""
 
 INSTALLED_BIN="$BIN_DIR/cua-driver"
+
+# --- Agent skill pack symlinks -----------------------------------------
+# Mirror install.sh: drop a symlink into each detected agent's skills
+# dir, pointing at <current>/Skills/cua-driver-rs so upgrades stay
+# transparent. Never overwrites existing user links.
+SKILL_TARGET="$CURRENT_LINK/Skills/cua-driver-rs"
+
+link_skill_into_local() {
+    local parent_dir="$1"
+    local label="$2"
+    local link_path="$parent_dir/cua-driver-rs"
+    [ -d "$parent_dir" ] || return 0
+    if [ -e "$link_path" ] || [ -L "$link_path" ]; then
+        echo "  $label skill link already exists at $link_path (skipping)"
+        return 0
+    fi
+    [ -d "$SKILL_TARGET" ] || return 0
+    ln -s "$SKILL_TARGET" "$link_path"
+    echo "${GREEN}  symlinked $label skill at $link_path${NORMAL}"
+}
+
+link_skill_into_local "$HOME/.claude/skills"           "Claude Code"
+if [ -d "$HOME/.codex" ] && [ ! -d "$HOME/.agents/skills" ]; then
+    mkdir -p "$HOME/.agents/skills"
+fi
+link_skill_into_local "$HOME/.agents/skills"           "Codex"
+if [ -d "$HOME/.openclaw" ] && [ ! -d "$HOME/.openclaw/skills" ]; then
+    mkdir -p "$HOME/.openclaw/skills"
+fi
+link_skill_into_local "$HOME/.openclaw/skills"         "OpenClaw"
+if [ -d "$HOME/.config/opencode" ] && [ ! -d "$HOME/.config/opencode/skills" ]; then
+    mkdir -p "$HOME/.config/opencode/skills"
+fi
+link_skill_into_local "$HOME/.config/opencode/skills"  "OpenCode"
+echo ""
 
 # --- Autostart (optional) ----------------------------------------------
 
